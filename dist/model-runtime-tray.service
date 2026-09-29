@@ -1,0 +1,12 @@
+[Unit]
+Description=Tray icon for model-runtime
+Documentation=https://github.com/mtch3n/model-runtime
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/model-runtime tray
+Restart=on-failure
+
+[Install]
+WantedBy=graphical-session.target

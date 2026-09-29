@@ -1,6 +1,7 @@
 mod catalog;
 mod registry;
 mod server;
+mod tray;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -27,6 +28,12 @@ enum Command {
         #[arg(long, default_value_t = 5)]
         idle_minutes: u64,
     },
+    /// Show a tray icon with what the service is doing
+    Tray {
+        /// Socket the service listens on
+        #[arg(long, default_value_os_t = default_socket())]
+        socket: PathBuf,
+    },
     /// Download a model
     Pull { id: String },
     /// List the models this runtime knows and which are installed
@@ -51,6 +58,7 @@ fn main() -> Result<()> {
                 Duration::from_secs(idle_minutes * 60),
             ))
         }
+        Command::Tray { socket } => tray::run(socket),
         Command::Pull { id } => {
             let Some(spec) = catalog::find(&id) else {
                 bail!("no model named {id}");

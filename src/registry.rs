@@ -27,6 +27,8 @@ struct Status {
     loaded_at: Option<Instant>,
     last_used: Option<Instant>,
     requests: u64,
+    /// Loading or working on a request.
+    busy: bool,
 }
 
 #[derive(Serialize)]
@@ -38,6 +40,7 @@ pub struct ModelInfo {
     loaded_secs: Option<u64>,
     idle_secs: Option<u64>,
     requests: u64,
+    busy: bool,
 }
 
 pub struct Span {
@@ -99,6 +102,7 @@ impl Registry {
                     loaded_secs: secs(status.loaded_at),
                     idle_secs: secs(status.last_used),
                     requests: status.requests,
+                    busy: status.busy,
                 }
             })
             .collect()
@@ -177,6 +181,7 @@ impl Worker {
                     Err(_) => return,
                 }
             };
+            self.status.lock().unwrap().busy = true;
             match job {
                 Job::Load(reply) => {
                     let _ = reply.send(self.load().map(|_| ()));
@@ -194,6 +199,7 @@ impl Worker {
                     let _ = reply.send(self.detect(&texts, &tasks, &params));
                 }
             }
+            self.status.lock().unwrap().busy = false;
         }
     }
 
