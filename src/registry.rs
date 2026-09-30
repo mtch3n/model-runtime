@@ -10,7 +10,8 @@ use gliner2_rs::{InferenceParams, Precision, SchemaTask, SpanConfig, SpanEngine,
 use serde::Serialize;
 use tokio::sync::oneshot;
 
-use crate::catalog::{CATALOG, Spec};
+use crate::catalog::{CATALOG, Source, Spec};
+use crate::chat::{Chat, Message, Reply};
 
 pub struct Registry {
     slots: Vec<Slot>,
@@ -59,6 +60,17 @@ enum Job {
         params: InferenceParams,
         reply: oneshot::Sender<Result<Vec<Vec<Span>>>>,
     },
+    Chat {
+        messages: Vec<Message>,
+        max_tokens: u32,
+        temperature: f32,
+        reply: oneshot::Sender<Result<Reply>>,
+    },
+}
+
+enum Engine {
+    Spans(Box<SpanEngine>),
+    Chat(Chat),
 }
 
 impl Registry {
@@ -142,6 +154,22 @@ impl Registry {
         .await?
     }
 
+    pub async fn chat(
+        &self,
+        id: &str,
+        messages: Vec<Message>,
+        max_tokens: u32,
+        temperature: f32,
+    ) -> Result<Reply> {
+        self.send(id, |reply| Job::Chat {
+            messages,
+            max_tokens,
+            temperature,
+            reply,
+        })
+        .await?
+    }
+
     async fn send<T>(&self, id: &str, job: impl FnOnce(oneshot::Sender<T>) -> Job) -> Result<T> {
         let Some(slot) = self.slots.iter().find(|s| s.spec.id == id) else {
             bail!("no model named {id}");
@@ -159,7 +187,7 @@ impl Registry {
 struct Worker {
     spec: &'static Spec,
     status: Arc<Mutex<Status>>,
-    engine: Option<SpanEngine>,
+    engine: Option<Engine>,
 }
 
 impl Worker {
@@ -198,12 +226,20 @@ impl Worker {
                 } => {
                     let _ = reply.send(self.detect(&texts, &tasks, &params));
                 }
+                Job::Chat {
+                    messages,
+                    max_tokens,
+                    temperature,
+                    reply,
+                } => {
+                    let _ = reply.send(self.chat(&messages, max_tokens, temperature));
+                }
             }
             self.status.lock().unwrap().busy = false;
         }
     }
 
-    fn load(&mut self) -> Result<&mut SpanEngine> {
+    fn load(&mut self) -> Result<&mut Engine> {
         if self.engine.is_none() {
             if !self.spec.installed() {
                 bail!(
@@ -213,8 +249,13 @@ impl Worker {
                 );
             }
             let started = Instant::now();
-            let config = SpanConfig::new(self.spec.dir()).with_precision(Precision::Fp32);
-            self.engine = Some(SpanEngine::new(config)?);
+            self.engine = Some(match self.spec.source {
+                Source::Gliner(_) => {
+                    let config = SpanConfig::new(self.spec.dir()).with_precision(Precision::Fp32);
+                    Engine::Spans(Box::new(SpanEngine::new(config)?))
+                }
+                Source::Gguf { file, .. } => Engine::Chat(Chat::load(&self.spec.dir().join(file))?),
+            });
             eprintln!("loaded {} in {:.1?}", self.spec.id, started.elapsed());
             self.status.lock().unwrap().loaded_at = Some(Instant::now());
         }
@@ -237,7 +278,13 @@ impl Worker {
         tasks: &[SchemaTask],
         params: &InferenceParams,
     ) -> Result<Vec<Vec<Span>>> {
-        let engine = self.load()?;
+        // Checked before loading, so asking the wrong model loads nothing.
+        if !matches!(self.spec.source, Source::Gliner(_)) {
+            bail!("{} doesn't find spans", self.spec.id);
+        }
+        let Engine::Spans(engine) = self.load()? else {
+            unreachable!("a GLiNER2 model loads as spans");
+        };
         let found = texts
             .iter()
             .map(|text| {
@@ -254,9 +301,25 @@ impl Worker {
                     .collect())
             })
             .collect::<Result<Vec<_>>>()?;
+        self.used();
+        Ok(found)
+    }
+
+    fn chat(&mut self, messages: &[Message], max_tokens: u32, temperature: f32) -> Result<Reply> {
+        if !matches!(self.spec.source, Source::Gguf { .. }) {
+            bail!("{} doesn't chat", self.spec.id);
+        }
+        let Engine::Chat(chat) = self.load()? else {
+            unreachable!("a GGUF model loads as a chat");
+        };
+        let reply = chat.reply(messages, max_tokens, temperature)?;
+        self.used();
+        Ok(reply)
+    }
+
+    fn used(&self) {
         let mut status = self.status.lock().unwrap();
         status.last_used = Some(Instant::now());
         status.requests += 1;
-        Ok(found)
     }
 }

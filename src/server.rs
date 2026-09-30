@@ -3,7 +3,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use axum::extract::{Path as UrlPath, State};
@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::net::{UnixListener, UnixStream};
 
+use crate::chat::{Finish, Message};
 use crate::registry::{ModelInfo, Registry};
 
 type Shared = Arc<Registry>;
@@ -29,6 +30,7 @@ pub async fn serve(socket: PathBuf, idle: Duration) -> Result<()> {
         .route("/models/{id}/load", post(load))
         .route("/models/{id}/unload", post(unload))
         .route("/models/{id}/detect", post(detect))
+        .route("/v1/chat/completions", post(chat_completions))
         .with_state(registry);
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown())
@@ -166,6 +168,94 @@ async fn detect(
         })
         .collect();
     Ok(Json(DetectResponse { fields }))
+}
+
+/// OpenAI's chat completion request, for the parts this runtime takes.
+#[derive(Deserialize)]
+struct ChatRequest {
+    model: String,
+    messages: Vec<Message>,
+    #[serde(default = "default_max_tokens", alias = "max_tokens")]
+    max_completion_tokens: u32,
+    #[serde(default = "default_temperature")]
+    temperature: f32,
+    #[serde(default)]
+    stream: bool,
+}
+
+fn default_max_tokens() -> u32 {
+    1024
+}
+
+fn default_temperature() -> f32 {
+    1.0
+}
+
+#[derive(Serialize)]
+struct ChatResponse {
+    id: String,
+    object: &'static str,
+    created: u64,
+    model: String,
+    choices: [Choice; 1],
+    usage: Usage,
+}
+
+#[derive(Serialize)]
+struct Choice {
+    index: u32,
+    message: AssistantMessage,
+    finish_reason: Finish,
+}
+
+#[derive(Serialize)]
+struct AssistantMessage {
+    role: &'static str,
+    content: String,
+}
+
+#[derive(Serialize)]
+struct Usage {
+    prompt_tokens: usize,
+    completion_tokens: usize,
+    total_tokens: usize,
+}
+
+async fn chat_completions(
+    State(registry): State<Shared>,
+    Json(req): Json<ChatRequest>,
+) -> Result<Json<ChatResponse>, Error> {
+    if req.stream {
+        return Err(anyhow::anyhow!("streaming isn't supported").into());
+    }
+    let reply = registry
+        .chat(
+            &req.model,
+            req.messages,
+            req.max_completion_tokens,
+            req.temperature,
+        )
+        .await?;
+    let created = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    Ok(Json(ChatResponse {
+        id: format!("chatcmpl-{created}"),
+        object: "chat.completion",
+        created,
+        model: req.model,
+        choices: [Choice {
+            index: 0,
+            message: AssistantMessage {
+                role: "assistant",
+                content: reply.content,
+            },
+            finish_reason: reply.finish,
+        }],
+        usage: Usage {
+            prompt_tokens: reply.prompt_tokens,
+            completion_tokens: reply.completion_tokens,
+            total_tokens: reply.prompt_tokens + reply.completion_tokens,
+        },
+    }))
 }
 
 struct Error(anyhow::Error);

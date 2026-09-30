@@ -15,7 +15,8 @@ loading or working, and red when the service isn't running. Its menu shows each
 model and the memory in use, unloads a model, and starts or stops the service.
 
 `serve` needs ONNX Runtime 1.23 or newer: `onnxruntime-cpu` on Arch, or set
-`ORT_DYLIB_PATH` to a `libonnxruntime.so`.
+`ORT_DYLIB_PATH` to a `libonnxruntime.so`. Building it needs `cmake` and
+`clang`, for the llama.cpp it builds in.
 
 On Arch, `model-runtime-git` from [mtch3n/PKGBUILDS](https://github.com/mtch3n/PKGBUILDS)
 installs it with a systemd user service:
@@ -35,6 +36,7 @@ through; [`dist/model-runtime.service`](dist/model-runtime.service) is the unit.
 | id | model | RAM when loaded |
 |---|---|---|
 | `pii` | [GLiNER2-PII](https://huggingface.co/fastino/gliner2-privacy-filter-PII-multi), 42 PII types in 7 languages, via [gliner2-rs](https://github.com/dariofinardi/gliner2-rs) | about 1.9 GB |
+| `gemma` | [Gemma 4 E2B](https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf), the smallest Gemma 4 and the one Pixel 10's on-device AI is built on, 4-bit, text only, via [llama.cpp](https://github.com/ggml-org/llama.cpp) | about 4.5 GB |
 
 ## API
 
@@ -59,3 +61,23 @@ HTTP on the socket, which only its owner can open:
 `labels` and `threshold` are optional; without labels, every type the model
 knows is looked for. `start` and `end` are byte offsets, end exclusive. Spans
 can overlap: a name is found as `full_name`, `first_name` and `last_name`.
+
+- `POST /v1/chat/completions`, OpenAI's chat completions, so OpenAI's clients
+  work pointed at the socket:
+
+```json
+{ "model": "gemma",
+  "messages": [{ "role": "user", "content": "Say hi in Danish" }] }
+```
+
+```json
+{ "id": "chatcmpl-1790000000", "object": "chat.completion", "created": 1790000000,
+  "model": "gemma",
+  "choices": [{ "index": 0, "finish_reason": "stop",
+    "message": { "role": "assistant", "content": "Hej!" } }],
+  "usage": { "prompt_tokens": 13, "completion_tokens": 3, "total_tokens": 16 } }
+```
+
+`max_completion_tokens` (or `max_tokens`, default 1024) and `temperature`
+(default 1; 0 always picks the likeliest word) are optional. Content is text;
+streaming, tools, images and thinking aren't supported.

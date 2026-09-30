@@ -1,4 +1,5 @@
 mod catalog;
+mod chat;
 mod registry;
 mod server;
 mod tray;
